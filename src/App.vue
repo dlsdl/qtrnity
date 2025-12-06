@@ -1,6 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import OmegaNum from './OmegaNum.js';
+import pako from 'pako';
 
 // 游戏状态
 const currentTab = ref('game');
@@ -9,13 +10,22 @@ const saveData = ref(null);
 const saveDataText = ref('');
 const isFighting = ref(true);
 const isPaused = ref(true);
-const isContinuous = ref(true);
+const isContinuous = ref(false);
+const isAutoProgress = ref(false);
 const player = reactive({
   level: new OmegaNum(1),
   souls: new OmegaNum(0),
+  experience: new OmegaNum(0),
   maxDefeatedLevel: new OmegaNum(1),
   sacredSouls: new OmegaNum(0),
+  sacredSouls2: new OmegaNum(0),
   upgrades: {
+    1: new OmegaNum(1),
+    2: new OmegaNum(1),
+    3: new OmegaNum(1),
+    4: new OmegaNum(1),
+  },
+  upgrades2: {
     1: new OmegaNum(1),
     2: new OmegaNum(1),
     3: new OmegaNum(1),
@@ -29,16 +39,42 @@ const enemyLevel = ref(new OmegaNum(1));
 const fightInterval = ref(null);
 
 // 计算属性
-const totalDamage=computed(()=> player.level.mul(player.upgrades[1].gt(0) ? player.upgrades[1] : new OmegaNum(1)))
-const totalSoulGain=computed(()=> enemyLevel.value.mul(player.upgrades[2].gt(0) ? player.upgrades[2] : new OmegaNum(1)))
+const totalDamage=computed(()=> 
+player.level
+.pow(player.upgrades[1].gt(0) ? player.upgrades[1] : new OmegaNum(1))
+.pow(player.upgrades2[1].gt(0) ? player.upgrades2[1] : new OmegaNum(1)));
+const totalExpGain=computed(()=> 
+enemyLevel.value
+.pow(player.upgrades[2].gt(0) ? player.upgrades[2] : new OmegaNum(1))
+.pow(player.upgrades2[2].gt(0) ? player.upgrades2[2] : new OmegaNum(1)));
 const totalEnemyLife=computed(()=>
-OmegaNum.pow(2, enemyLevel.value).div(player.upgrades[3].gt(0) ? player.upgrades[3] : new OmegaNum(1)));
-const totalLevelCost=computed(()=>
-OmegaNum.pow(2, player.level).div(player.upgrades[4].gt(0) ? player.upgrades[4] : new OmegaNum(1)));
+OmegaNum.pow(2, enemyLevel.value)
+.root(player.upgrades[3].gt(0) ? player.upgrades[3] : new OmegaNum(1))
+.root(player.upgrades2[3].gt(0) ? player.upgrades2[3] : new OmegaNum(1)));
+const totalExpReq=computed(()=>
+OmegaNum.pow(2, player.level)
+.root(player.upgrades[4].gt(0) ? player.upgrades[4] : new OmegaNum(1))
+.root(player.upgrades2[4].gt(0) ? player.upgrades2[4] : new OmegaNum(1)));
+const expPercentage=computed(()=>{
+  if (totalExpReq.value && totalExpReq.value.gt(0)) {
+    return player.experience.div(totalExpReq.value).mul(100).toNumber();
+  }
+  return 0;
+});
 const canRefine = computed(() => 
 player.level.gte(10) && player.maxDefeatedLevel.gte(10));
+const canRefine2 = computed(() => 
+player.level.gte(100) && player.maxDefeatedLevel.gte(100));
 const maxSelectableEnemyLevel = computed(() => 
   new OmegaNum(player.maxDefeatedLevel).toNumber());
+const expPerSecond = computed(() => {
+  // 计算击败敌人所需时间（毫秒）
+  const timeToDefeatMs = (enemyMaxLife.value.toNumber() / (totalDamage.value.toNumber() / 10)) * 100+100;
+  // 转换为秒
+  const timeToDefeatSeconds = timeToDefeatMs / 1000;
+  // 每秒经验 = 总经验 / 时间（秒）
+  return new OmegaNum(totalExpGain.value.toNumber() / timeToDefeatSeconds);
+});
 const lifeBarWidth = computed(() => {
   const current = new OmegaNum(enemyCurrentLife.value || 0).toNumber();
   const max = new OmegaNum(enemyMaxLife.value || 1).toNumber();
@@ -48,11 +84,31 @@ const lifeBarWidth = computed(() => {
 // 炼魂功能
 function refineSouls() {
   player.sacredSouls = player.sacredSouls.add(
-    player.level.mul(player.maxDefeatedLevel).pow(0.5)
+    player.level.mul(player.maxDefeatedLevel).pow(2).div(1e4)
   );
   player.level = new OmegaNum(1);
   player.maxDefeatedLevel = new OmegaNum(1);
   player.souls = new OmegaNum(0);
+  player.experience = new OmegaNum(0);
+  enemyLevel.value = new OmegaNum(1);
+  enemyMaxLife.value = totalEnemyLife.value;
+  enemyCurrentLife.value = new OmegaNum(enemyMaxLife.value);
+}
+
+// 炼魂^2重置功能
+function refineSouls2() {
+  player.sacredSouls2 = player.sacredSouls2.add(
+    player.level.mul(player.maxDefeatedLevel).pow(2).div(1e8)
+  );
+  player.level = new OmegaNum(1);
+  player.maxDefeatedLevel = new OmegaNum(1);
+  player.souls = new OmegaNum(0);
+  player.experience = new OmegaNum(0);
+  player.sacredSouls = new OmegaNum(0);
+  // 重置圣魂升级
+  [1,2,3,4].forEach(n => {
+    player.upgrades[n] = new OmegaNum(1);
+  });
   enemyLevel.value = new OmegaNum(1);
   enemyMaxLife.value = totalEnemyLife.value;
   enemyCurrentLife.value = new OmegaNum(enemyMaxLife.value);
@@ -60,17 +116,26 @@ function refineSouls() {
 
 // 圣魂升级功能
 function upgradeSacred(type) {
-  let cost = OmegaNum.pow(2, player.upgrades[type]);
+  let cost = OmegaNum.pow(100, player.upgrades[type].sub(1));
   if (player.sacredSouls.gte(cost)) {
     player.sacredSouls = player.sacredSouls.sub(cost);
     player.upgrades[type] = player.upgrades[type].add(1);
   }
 }
 
-// 升级功能
-function levelUp() {
-  if (player.souls.gte(totalLevelCost.value)) {
-    player.souls = player.souls.sub(totalLevelCost.value);
+// 圣^2魂升级功能
+function upgradeSacred2(type) {
+  let cost = OmegaNum.pow(10000, player.upgrades2[type].sub(1));
+  if (player.sacredSouls2.gte(cost)) {
+    player.sacredSouls2 = player.sacredSouls2.sub(cost);
+    player.upgrades2[type] = player.upgrades2[type].add(1);
+  }
+}
+
+// 检查经验升级
+function checkLevelUp() {
+  while (player.experience.gte(totalExpReq.value)) {
+    player.experience = player.experience.sub(totalExpReq.value);
     player.level = player.level.add(1);
   }
 }
@@ -112,12 +177,22 @@ function endFight(isVictory) {
   isPaused.value = true;
   
   if (isVictory) {
-      // 获得灵魂奖励
-      player.souls = player.souls.add(totalSoulGain.value);
+      // 获得经验奖励
+      player.experience = player.experience.add(totalExpGain.value);
+      
+      // 检查升级
+      checkLevelUp();
       
       // 更新最高击败等级
       if (enemyLevel.value.add(1).gte(player.maxDefeatedLevel)) {
         player.maxDefeatedLevel = enemyLevel.value.add(1);
+      }
+      
+      // 自动推关逻辑
+      if (isAutoProgress.value) {
+        // 敌人等级+1
+        const newLevel = enemyLevel.value.toNumber() + 1
+        selectEnemyLevel(newLevel);
       }
       
       // 重置敌人生命
@@ -126,7 +201,7 @@ function endFight(isVictory) {
       
       // 持续战斗逻辑
       if (isContinuous.value) {
-        setTimeout(() => {
+
           isPaused.value = false;
           if (!fightInterval.value) {
             // 重置敌人生命值并直接启动战斗
@@ -139,7 +214,7 @@ function endFight(isVictory) {
               }
             }, 100);
           }
-        }, 1000);
+
       }
     }
 }
@@ -154,13 +229,21 @@ function saveGame() {
     player: {
       level: player.level.toString(),
       souls: player.souls.toString(),
+      experience: player.experience.toString(),
       maxDefeatedLevel: player.maxDefeatedLevel.toString(),
       sacredSouls: player.sacredSouls.toString(),
+      sacredSouls2: player.sacredSouls2.toString(),
       upgrades: {
         1: player.upgrades[1].toString(),
         2: player.upgrades[2].toString(),
         3: player.upgrades[3].toString(),
         4: player.upgrades[4].toString()
+      },
+      upgrades2: {
+        1: player.upgrades2[1].toString(),
+        2: player.upgrades2[2].toString(),
+        3: player.upgrades2[3].toString(),
+        4: player.upgrades2[4].toString()
       }
     }
   };
@@ -169,39 +252,71 @@ function saveGame() {
 }
 
 function exportAsText(){
-    saveDataText.value = JSON.stringify(saveData.value || {
+    const dataToExport = saveData.value || {
         player: {
           level: player.level,
           souls: player.souls,
+          experience: player.experience,
           maxDefeatedLevel: player.maxDefeatedLevel,
           sacredSouls: player.sacredSouls,
+          sacredSouls2: player.sacredSouls2,
           upgrades: {
             1: player.upgrades[1],
             2: player.upgrades[2],
             3: player.upgrades[3],
             4: player.upgrades[4]
+          },
+          upgrades2: {
+            1: player.upgrades2[1],
+            2: player.upgrades2[2],
+            3: player.upgrades2[3],
+            4: player.upgrades2[4]
           }
         }
-      });
+      };
+    
+    // 转换为JSON字符串
+    const jsonString = JSON.stringify(dataToExport);
+    // 使用pako压缩为二进制数据
+    const compressed = pako.deflate(jsonString);
+    // 转换为base64格式
+    const base64 = btoa(String.fromCharCode.apply(null, compressed));
+    
+    saveDataText.value = base64;
 }
 
 function exportSave() {
-  const data = JSON.stringify(saveData.value || {
+  const dataToExport = saveData.value || {
     player: {
           level: player.level,
           souls: player.souls,
+          experience: player.experience,
           maxDefeatedLevel: player.maxDefeatedLevel,
           sacredSouls: player.sacredSouls,
+          sacredSouls2: player.sacredSouls2,
           upgrades: {
             1: player.upgrades[1],
             2: player.upgrades[2],
             3: player.upgrades[3],
             4: player.upgrades[4]
+          },
+          upgrades2: {
+            1: player.upgrades2[1],
+            2: player.upgrades2[2],
+            3: player.upgrades2[3],
+            4: player.upgrades2[4]
           }
         }
-  });
+  };
+  
+  // 转换为JSON字符串
+  const jsonString = JSON.stringify(dataToExport);
+  // 使用pako压缩为二进制数据
+  const compressed = pako.deflate(jsonString);
+  // 转换为base64格式
+  const base64 = btoa(String.fromCharCode.apply(null, compressed));
 
-  const blob = new Blob([data], { type: 'application/json' });
+  const blob = new Blob([base64], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -212,7 +327,26 @@ function exportSave() {
 
 function importFromText() {
   try {
-    const importedData = JSON.parse(saveDataText.value);
+    let importedData;
+    
+    // 尝试处理压缩后的base64数据
+    try {
+      // 解码base64字符串
+      const base64Decoded = atob(saveDataText.value);
+      // 转换为Uint8Array用于pako解压缩
+      const uint8Array = new Uint8Array(base64Decoded.length);
+      for (let i = 0; i < base64Decoded.length; i++) {
+        uint8Array[i] = base64Decoded.charCodeAt(i);
+      }
+      // 使用pako解压缩
+      const decompressed = pako.inflate(uint8Array, { to: 'string' });
+      // 解析JSON
+      importedData = JSON.parse(decompressed);
+    } catch (compressionError) {
+      // 如果处理压缩数据失败，尝试直接解析JSON（兼容旧存档）
+      importedData = JSON.parse(saveDataText.value);
+    }
+    
     // 验证存档数据结构
     if ((importedData.player?.level || importedData.playerLevel) && (importedData.player?.souls || importedData.playerSouls)) {
       saveData.value = importedData;
@@ -220,18 +354,24 @@ function importFromText() {
       // 更新游戏状态
       player.level = new OmegaNum( importedData.player.level);
       player.souls = new OmegaNum( importedData.player.souls);
+      player.experience = new OmegaNum( importedData.player.experience || 0);
       player.maxDefeatedLevel = new OmegaNum(importedData.player?.maxDefeatedLevel || 1);
       player.sacredSouls = new OmegaNum(importedData.player?.sacredSouls || 0);
+      player.sacredSouls2 = new OmegaNum(importedData.player?.sacredSouls2 || 0);
       const upgrades = importedData.player?.upgrades || {};
       [1,2,3,4].forEach(n => {
         player.upgrades[n] = new OmegaNum(upgrades[n] || 1);
+      });
+      const upgrades2 = importedData.player?.upgrades2 || {};
+      [1,2,3,4].forEach(n => {
+        player.upgrades2[n] = new OmegaNum(upgrades2[n] || 1);
       });
       alert('从文本导入存档成功！');
     } else {
       alert('导入失败：存档数据格式不正确');
     }
   } catch (e) {
-    alert('导入失败：无效的JSON格式');
+    alert('导入失败：' + e.message);
   }
 }
 
@@ -241,15 +381,41 @@ function importSave(event) {
   const reader = new FileReader();
   reader.onload = e => {
     try {
-      const data = JSON.parse(e.target.result);
+      let data;
+      const fileContent = e.target.result;
+      
+      // 尝试处理压缩后的base64数据
+    try {
+      // 解码base64字符串
+      const base64Decoded = atob(fileContent);
+      // 转换为Uint8Array用于pako解压缩
+      const uint8Array = new Uint8Array(base64Decoded.length);
+      for (let i = 0; i < base64Decoded.length; i++) {
+        uint8Array[i] = base64Decoded.charCodeAt(i);
+      }
+      // 使用pako解压缩
+      const decompressed = pako.inflate(uint8Array, { to: 'string' });
+      // 解析JSON
+      data = JSON.parse(decompressed);
+    } catch (compressionError) {
+      // 如果处理压缩数据失败，尝试直接解析JSON（兼容旧存档）
+      data = JSON.parse(fileContent);
+    }
+      
       if ((data.player?.level || data.playerLevel) && (data.player?.souls || data.playerSouls) !== undefined) {
         player.level = new OmegaNum(data.player?.level || data.playerLevel);
         player.souls = new OmegaNum(data.player?.souls || data.playerSouls);
+        player.experience = new OmegaNum(data.player?.experience || 0);
         player.maxDefeatedLevel = new OmegaNum(data.player?.maxDefeatedLevel || 1);
         player.sacredSouls = new OmegaNum(data.player?.sacredSouls || 0);
+        player.sacredSouls2 = new OmegaNum(data.player?.sacredSouls2 || 0);
         const upgrades = data.player?.upgrades || {};
         [1,2,3,4].forEach(n => {
           player.upgrades[n] = new OmegaNum(upgrades[n] || 1);
+        });
+        const upgrades2 = data.player?.upgrades2 || {};
+        [1,2,3,4].forEach(n => {
+          player.upgrades2[n] = new OmegaNum(upgrades2[n] || 1);
         });
         saveGame();
         alert('存档导入成功！');
@@ -267,10 +433,15 @@ function resetGameData() {
   if (confirm('确定要重置所有游戏数据吗？此操作不可恢复！')) {
     player.level = new OmegaNum(1);
     player.souls = new OmegaNum(0);
+    player.experience = new OmegaNum(0);
     player.maxDefeatedLevel = new OmegaNum(0);
     player.sacredSouls = new OmegaNum(0);
+    player.sacredSouls2 = new OmegaNum(0);
     [1,2,3,4].forEach(n => {
       player.upgrades[n] = new OmegaNum(1);
+    });
+    [1,2,3,4].forEach(n => {
+      player.upgrades2[n] = new OmegaNum(1);
     });
     enemyLevel.value = new OmegaNum(1);
     enemyMaxLife.value = new OmegaNum(2);
@@ -290,11 +461,17 @@ onMounted(() => {
       const data = JSON.parse(saved);
       player.level = new OmegaNum(data.player?.level || 1);
       player.souls = new OmegaNum(data.player?.souls || 0);
+      player.experience = new OmegaNum(data.player?.experience || 0);
       player.maxDefeatedLevel = new OmegaNum(data.player?.maxDefeatedLevel || 1);
       player.sacredSouls = new OmegaNum(data.player?.sacredSouls || 0);
+      player.sacredSouls2 = new OmegaNum(data.player?.sacredSouls2 || 0);
       const upgrades = data.player?.upgrades || {};
       [1,2,3,4].forEach(n => {
         player.upgrades[n] = new OmegaNum(upgrades[n] || 1);
+      });
+      const upgrades2 = data.player?.upgrades2 || {};
+      [1,2,3,4].forEach(n => {
+        player.upgrades2[n] = new OmegaNum(upgrades2[n] || 1);
       });
       saveData.value = data;
     } catch (err) {
@@ -344,63 +521,104 @@ onUnmounted(() => {
     
     <!-- 游戏界面 -->
     <!-- 炼魂界面 -->
-      <div v-if="currentTab === 'soul'" class="soul-tab">
-        <button 
-          @click="refineSouls"
-          :disabled="!canRefine"
-        >
-          炼魂（获得{{ player.level.mul(player.maxDefeatedLevel).pow(0.5).format() }}圣魂）
-        </button><br />
-        {{canRefine ? '' : '炼魂需要玩家等级≥10且最高敌人等级≥10'}}
-        （当前圣魂：{{ player.sacredSouls.format() }}）
-        <div class="upgrades">
-          <div class="upgrade-item">
-            <p>升级1（等级{{ player.upgrades[1].format() }}）：每秒伤害乘以{{ player.upgrades[1].format() }}</p>
-            <button @click="upgradeSacred(1)">
-              升级（消耗：{{ OmegaNum.pow(2, player.upgrades[1]).format() }}圣魂）
-            </button>
-          </div>
-          <div class="upgrade-item">
-            <p>升级2（等级{{ player.upgrades[2].format() }}）：获得灵魂乘以{{ player.upgrades[2].format() }}</p>
-            <button @click="upgradeSacred(2)">
-              升级（消耗：{{ OmegaNum.pow(2, player.upgrades[2]).format() }}圣魂）
-            </button>
-          </div>
-          <div class="upgrade-item">
-            <p>升级3（等级{{ player.upgrades[3].format() }}）：敌人生命除以{{ player.upgrades[3].format() }}</p>
-            <button @click="upgradeSacred(3)">
-              升级（消耗：{{ OmegaNum.pow(2, player.upgrades[3]).format() }}圣魂）
-            </button>
-          </div>
-          <div class="upgrade-item">
-            <p>升级4（等级{{ player.upgrades[4].format() }}）：升级花费除以{{ player.upgrades[4].format() }}</p>
-            <button @click="upgradeSacred(4)">
-              升级（消耗：{{ OmegaNum.pow(2, player.upgrades[4]).format() }}圣魂）
-            </button>
-            </div>
-          </div>
+    <div v-if="currentTab === 'soul'" class="soul-tab">
+      <h3 style="margin-top: 30px; color: #ff6b6b;">炼魂系统</h3>
+      <button @click="refineSouls" :disabled="!canRefine">
+          炼魂重置（获得{{ player.level.mul(player.maxDefeatedLevel).pow(2).div(1e4).format() }}圣魂）
+      </button><br />
+      {{canRefine ? '' : '炼魂需要玩家等级≥10且最高敌人等级≥10'}}
+      （当前圣魂：{{ player.sacredSouls.format() }}）
+      <div class="upgrades">
+        <div class="upgrade-item">
+          <p>升级1（等级{{ player.upgrades[1].format() }}）：每秒伤害^{{ player.upgrades[1].format() }}</p>
+          <button @click="upgradeSacred(1)">
+              升级（消耗：{{ OmegaNum.pow(100, player.upgrades[1].sub(1)).format() }}圣魂）
+          </button>
+        </div>
+        <div class="upgrade-item">
+          <p>升级2（等级{{ player.upgrades[2].format() }}）：获得经验^{{ player.upgrades[2].format() }}</p>
+          <button @click="upgradeSacred(2)">
+            升级（消耗：{{ OmegaNum.pow(100, player.upgrades[2].sub(1)).format() }}圣魂）
+          </button>
+        </div>
+        <div class="upgrade-item">
+          <p>升级3（等级{{ player.upgrades[3].format() }}）：敌人生命^1/{{ player.upgrades[3].format() }}</p>
+          <button @click="upgradeSacred(3)">
+            升级（消耗：{{ OmegaNum.pow(100, player.upgrades[3].sub(1)).format() }}圣魂）
+          </button>
+        </div>
+        <div class="upgrade-item">
+          <p>升级4（等级{{ player.upgrades[4].format() }}）：经验需求^1/{{ player.upgrades[4].format() }}</p>
+          <button @click="upgradeSacred(4)">
+              升级（消耗：{{ OmegaNum.pow(100, player.upgrades[4].sub(1)).format() }}圣魂）
+          </button>
         </div>
       </div>
+        
+      <h3 style="margin-top: 30px; color: #ff6b6b;">炼魂^2系统</h3>
+      <button 
+          @click="refineSouls2"
+          :disabled="!canRefine2"
+          style="background-color: #ff6b6b; margin-top: 10px;"
+      >
+         炼魂^2重置（获得{{ player.level.mul(player.maxDefeatedLevel).pow(2).div(1e8).format() }}圣^2魂）
+      </button><br />
+      {{canRefine2 ? '' : '炼魂^2重置需要玩家等级≥100且最高敌人等级≥100'}}
+      （当前圣^2魂：{{ player.sacredSouls2.format() }}）
+      <div class="upgrades" style="margin-top: 20px;">
+        <div class="upgrade-item">
+          <p>升级1（等级{{ player.upgrades2[1].format() }}）：每秒伤害^{{ player.upgrades2[1].format() }}</p>
+          <button @click="upgradeSacred2(1)">
+            升级（消耗：{{ OmegaNum.pow(10000, player.upgrades2[1].sub(1)).format() }}圣^2魂）
+          </button>
+        </div>
+        <div class="upgrade-item">
+          <p>升级2（等级{{ player.upgrades2[2].format() }}）：获得经验^{{ player.upgrades2[2].format() }}</p>
+          <button @click="upgradeSacred2(2)">
+            升级（消耗：{{ OmegaNum.pow(10000, player.upgrades2[2].sub(1)).format() }}圣^2魂）
+          </button>
+        </div>
+        <div class="upgrade-item">
+          <p>升级3（等级{{ player.upgrades2[3].format() }}）：敌人生命^1/{{ player.upgrades2[3].format() }}</p>
+          <button @click="upgradeSacred2(3)">
+            升级（消耗：{{ OmegaNum.pow(10000, player.upgrades2[3].sub(1)).format() }}圣^2魂）
+           </button>
+        </div>
+        <div class="upgrade-item">
+          <p>升级4（等级{{ player.upgrades2[4].format() }}）：经验需求^1/{{ player.upgrades2[4].format() }}</p>
+          <button @click="upgradeSacred2(4)">
+            升级（消耗：{{ OmegaNum.pow(10000, player.upgrades2[4].sub(1)).format() }}圣^2魂）
+          </button>
+        </div>
+      </div>
+    </div>
 
-      <div v-if="currentTab === 'game'">
+    <div v-if="currentTab === 'game'">
       <!-- 玩家信息 -->
       <div class="player-info">
       <h3>玩家状态</h3>
       <p>等级: {{ player.level.formatI() }}</p>
-      <p>灵魂: {{ player.souls.format() }}</p>
-      <button 
-        @click="levelUp"
-        :disabled="!player.souls.gte(totalLevelCost)"
-      >
-        升级（{{ totalLevelCost.format() }} 灵魂）
-      </button>
-    </div>
+      <p>每秒伤害: {{ totalDamage.format() }}</p>
+      <p>经验: {{ player.experience.format() }} / {{ totalExpReq.format() }}</p>
+      <div class="exp-bar">
+        <div 
+          class="exp-bar-fill"
+          :style="{ width: expPercentage + '%' }"
+        ></div>
+        </div>
+      </div>
     
-    <!-- 敌人选择 -->
-    <div class="enemy-selection">
+      <!-- 敌人选择 -->
+      <div class="enemy-selection">
       <h3>选择敌人等级</h3>
       <p>当前选择: {{ enemyLevel }} 级</p>
       <div class="level-controls">
+        <button 
+          @click="selectEnemyLevel(enemyLevel.sub(1).max(1))"
+          class="level-button"
+        >
+          等级-1
+        </button>
         <input
           type="range"
           min="1"
@@ -417,17 +635,30 @@ onUnmounted(() => {
           @input="selectEnemyLevel($event.target.valueAsNumber)"
           class="level-input"
         >
+        <button 
+          @click="selectEnemyLevel(enemyLevel.add(1).min(maxSelectableEnemyLevel))"
+          class="level-button"
+        >
+          等级+1
+        </button>
       </div>
-            <label class="continuous-checkbox">
-        <input type="checkbox" v-model="isContinuous">
-        持续战斗
-      </label>
-    </div>
+            <div class="checkbox-group">
+        <label class="continuous-checkbox">
+          <input type="checkbox" v-model="isContinuous">
+          持续战斗
+        </label>
+        <label class="continuous-checkbox">
+          <input type="checkbox" v-model="isAutoProgress">
+          自动推关
+        </label>
+      </div>
+      </div>
     
-    <!-- 战斗界面 -->
-    <div class="battle" v-if="isFighting">
+      <!-- 战斗界面 -->
+      <div class="battle" v-if="isFighting">
       <h3>战斗中...{{ isPaused ? '（已暂停）' : '' }}</h3>
       <p>等级: {{ enemyLevel.formatI() }}</p>
+      <p>掉落经验: {{ totalExpGain.format() }}</p>
       <p>生命: {{ enemyCurrentLife.format() }} / {{ enemyMaxLife.format() }}</p>
       <div class="life-bar">
         <div 
@@ -435,22 +666,22 @@ onUnmounted(() => {
           :style="{ width: lifeBarWidth }"
         ></div>
       </div>
-      <p>每秒伤害: {{ totalDamage.format() }}</p>
-      <p>掉落灵魂: {{ totalSoulGain.format() }}</p>
       <button @click="toggleFight">
         {{ isPaused ? '继续' : '暂停' }}
       </button>
-  </div>
+    </div>
     
     <!-- 统计 -->
     <div class="history">
       <h3>统计</h3>
       <p>最高敌人等级: {{ player.maxDefeatedLevel.formatI() }}</p>
+      <p>每秒获得经验: {{ expPerSecond.format() }}</p>
     </div>
     </div>
 
     <!-- 存档界面 -->
     <div v-if="currentTab === 'save'" class="save-interface">
+      四位一体(quaternity) v0.1 作者：6左爷6(dlsdl)
   <div class="save-textarea">
     <textarea v-model="saveDataText" rows="10" placeholder="存档数据将显示在这里..."></textarea>
   </div>
@@ -460,23 +691,23 @@ onUnmounted(() => {
           手动保存
         </button>
         <button @click="exportAsText" class="save-button">
-      导出到输入框
+          导出到输入框
         </button>
         <button @click="importFromText" class="save-button">
-      从输入框导入
+          从输入框导入
         </button>
         <button @click="exportSave" class="save-button">
-      导出存档
+          导出存档
         </button>
-        <label class="save-button import-button">
-          导入存档
-          <input type="file" accept=".json" @change="importSave" hidden>
+        <label class="save-button">
+          导入存档<input type="file" accept=".json" @change="importSave" hidden>
         </label>
-        <button @click="resetGameData" class="save-button reset-button">
+        <button @click="resetGameData" class="save-button">
           重置游戏数据
         </button>
       </div>
     </div>
+  </div> 
 </template>
 
 <style scoped>
@@ -649,7 +880,20 @@ button.selected {
 .life-bar-fill {
   height: 100%;
   background-color: #42b883;
-  transition: width 0.5s;
+}
+
+.exp-bar {
+  width: 100%;
+  height: 20px;
+  background-color: #333;
+  border-radius: 10px;
+  overflow: hidden;
+  margin: 10px 0;
+}
+
+.exp-bar-fill {
+  height: 100%;
+  background-color: #646cff;
 }
 
 .enemy-selection {
@@ -685,8 +929,27 @@ button.selected {
   padding: 5px;
 }
 
-.continuous-checkbox {
+.level-button {
+  padding: 5px 10px;
+  background-color: #646cff;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.level-button:hover {
+  background-color: #535bf2;
+}
+
+.checkbox-group {
+  display: flex;
+  gap: 20px;
   margin-top: 10px;
+}
+
+.continuous-checkbox {
   display: flex;
   align-items: center;
   gap: 5px;

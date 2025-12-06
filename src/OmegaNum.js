@@ -27,7 +27,7 @@ const OmegaNum = (function (globalScope) {
     // NONE   0 Show no information.
     // NORMAL 1 Show operations.
     // ALL    2 Show everything.
-    debug: 2
+    debug: 0
   },
   // -- END OF EDITABLE DEFAULTS -- //
   
@@ -71,20 +71,36 @@ const OmegaNum = (function (globalScope) {
   // OmegaNum prototype methods
 P.format = function() {
   const val = this.array[0];
+  const val1 = this.array[1];
+  if(!val1){
   if (val == 0) return '0';
   if (val < 1e3 && val >= 0.1) return val.toFixed(1);
   const exponent = Math.floor(Math.log10(val));
   const mantissa = val / (10 ** exponent);
   return `${mantissa.toFixed(3)}e${exponent}`;
+  }
+ else if(val1 == 1){
+  const exponent1=Math.floor(val);
+  const mantissa1=Math.pow(10,val-exponent1);
+  return `${mantissa1.toFixed(3)}e${exponent1}`;
+ }
 };
 
 P.formatI = function() {
   const val = this.array[0];
+  const val1 = this.array[1];
+  if(!val1){
   if (val == 0) return '0';
-  if (val < 1e3) return val.toFixed(0);
+  if (val < 1e3 ) return val.toFixed(0);
   const exponent = Math.floor(Math.log10(val));
   const mantissa = val / (10 ** exponent);
   return `${mantissa.toFixed(3)}e${exponent}`;
+  }
+ else if(val1 == 1){
+  const exponent1=Math.floor(val);
+  const mantissa1=Math.pow(10,val-exponent1);
+  return `${mantissa1.toFixed(3)}e${exponent1}`;
+ }
 };
 
   P.absoluteValue=P.abs=function(){
