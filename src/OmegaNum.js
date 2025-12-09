@@ -84,6 +84,12 @@ P.format = function() {
   const mantissa1=Math.pow(10,val-exponent1);
   return `${mantissa1.toFixed(3)}e${exponent1}`;
  }
+ else if(val1 == 2){
+  const exponent2=Math.floor(val);
+  const mantissa2=Math.pow(10,val-exponent2);
+  return `e${mantissa2.toFixed(3)}e${exponent2}`;
+ }
+ else return this.toString();
 };
 
 P.formatI = function() {
@@ -101,6 +107,12 @@ P.formatI = function() {
   const mantissa1=Math.pow(10,val-exponent1);
   return `${mantissa1.toFixed(3)}e${exponent1}`;
  }
+ else if(val1 == 2){
+  const exponent2=Math.floor(val);
+  const mantissa2=Math.pow(10,val-exponent2);
+  return `e${mantissa2.toFixed(3)}e${exponent2}`;
+ }
+ else return this.toString();
 };
 
   P.absoluteValue=P.abs=function(){
